@@ -16,8 +16,8 @@ START_CMD = os.environ.get("START_CMD", "/start")
 BUTTON_TEXT = os.environ.get("BUTTON_TEXT", "签到")  # 你截图里就是“签到”
 SEND_TO = os.environ.get("SEND_TO", "me")          # 发到收藏消息
 TZ = os.environ.get("TZ", "Asia/Shanghai")         # 你要的8:00通常按中国时间，若不是可改
-WINDOW_START = os.environ.get("WINDOW_START", "08:00")
-WINDOW_END = os.environ.get("WINDOW_END", "08:30")
+WINDOW_START = os.environ.get("WINDOW_START", "20:15")
+WINDOW_END = os.environ.get("WINDOW_END", "20:20")
 
 # 两种 session 方式二选一：
 SESSION_STRING = os.environ.get("SESSION_STRING", "").strip()
