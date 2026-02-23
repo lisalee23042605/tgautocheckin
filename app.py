@@ -22,8 +22,8 @@ SEND_TO = os.environ.get("SEND_TO", "me")
 TZ = os.environ.get("TZ", "Asia/Shanghai")
 START_CMD = os.environ.get("START_CMD", "/start")
 BUTTON_KEYWORD = os.environ.get("BUTTON_KEYWORD", "签到")  # 用“关键词包含匹配”，能点到“🎯 签到”
-WINDOW_START = os.environ.get("WINDOW_START", "08:00")
-WINDOW_END = os.environ.get("WINDOW_END", "08:30")
+WINDOW_START = os.environ.get("WINDOW_START", "20:50")
+WINDOW_END = os.environ.get("WINDOW_END", "20:52")
 
 WAIT_BOT_REPLY_SEC = int(os.environ.get("WAIT_BOT_REPLY_SEC", "25"))
 COOLDOWN_ON_FAIL_SEC = int(os.environ.get("COOLDOWN_ON_FAIL_SEC", "900"))  # 失败冷却 15 分钟
