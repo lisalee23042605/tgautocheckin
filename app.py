@@ -9,19 +9,24 @@ from telethon.sessions import StringSession
 from PIL import Image, ImageDraw, ImageFont
 
 
+# ====== 必填环境变量 ======
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
-TARGET_BOT = os.environ.get("TARGET_BOT", "@okemby_bot")
-START_CMD = os.environ.get("START_CMD", "/start")
-BUTTON_TEXT = os.environ.get("BUTTON_TEXT", "签到")  # 你截图里就是“签到”
-SEND_TO = os.environ.get("SEND_TO", "me")          # 发到收藏消息
-TZ = os.environ.get("TZ", "Asia/Shanghai")         # 你要的8:00通常按中国时间，若不是可改
-WINDOW_START = os.environ.get("WINDOW_START", "20:15")
-WINDOW_END = os.environ.get("WINDOW_END", "20:20")
-
-# 两种 session 方式二选一：
-SESSION_STRING = os.environ.get("SESSION_STRING", "").strip()
+SESSION_STRING = os.environ.get("SESSION_STRING", "").strip()  # 推荐云上用它
 SESSION_PATH = os.environ.get("SESSION_PATH", "/data/user.session")
+
+TARGET_BOT = os.environ.get("TARGET_BOT", "@okemby_bot")
+SEND_TO = os.environ.get("SEND_TO", "me")
+
+# ====== 可选配置 ======
+TZ = os.environ.get("TZ", "Asia/Shanghai")
+START_CMD = os.environ.get("START_CMD", "/start")
+BUTTON_KEYWORD = os.environ.get("BUTTON_KEYWORD", "签到")  # 用“关键词包含匹配”，能点到“🎯 签到”
+WINDOW_START = os.environ.get("WINDOW_START", "08:00")
+WINDOW_END = os.environ.get("WINDOW_END", "08:30")
+
+WAIT_BOT_REPLY_SEC = int(os.environ.get("WAIT_BOT_REPLY_SEC", "25"))
+COOLDOWN_ON_FAIL_SEC = int(os.environ.get("COOLDOWN_ON_FAIL_SEC", "900"))  # 失败冷却 15 分钟
 
 
 def parse_hhmm(s: str) -> time:
@@ -30,7 +35,12 @@ def parse_hhmm(s: str) -> time:
 
 
 def choose_next_run(now: datetime) -> datetime:
-    """每天在窗口内随机一次运行时间；如果今天窗口已过，选明天。"""
+    """
+    每天在窗口内随机一次运行时间。
+    - 如果现在早于窗口开始：在 [start, end] 内随机
+    - 如果现在在窗口内：在 [now, end] 内随机（避免“过去时间”）
+    - 如果现在晚于窗口结束：选明天窗口
+    """
     tz = now.tzinfo
     start_t = parse_hhmm(WINDOW_START)
     end_t = parse_hhmm(WINDOW_END)
@@ -38,51 +48,47 @@ def choose_next_run(now: datetime) -> datetime:
     today_start = datetime.combine(now.date(), start_t, tzinfo=tz)
     today_end = datetime.combine(now.date(), end_t, tzinfo=tz)
 
-    # 生成窗口内随机秒
-    window_seconds = int((today_end - today_start).total_seconds())
-    if window_seconds <= 0:
-        raise ValueError("WINDOW_END must be later than WINDOW_START")
+    if today_end <= today_start:
+        raise ValueError("WINDOW_END must be later than WINDOW_START (same day).")
 
     if now < today_start:
         base = today_start
+        span = int((today_end - today_start).total_seconds())
     elif now <= today_end:
-        base = now  # 现在已经在窗口内：立即挑一个“从现在到窗口结束”的随机时间
-        window_seconds = int((today_end - base).total_seconds())
-        if window_seconds <= 0:
-            return now  # 已经到边界
+        base = now
+        span = int((today_end - now).total_seconds())
+        if span < 0:
+            span = 0
     else:
-        # 明天
         base = datetime.combine(now.date() + timedelta(days=1), start_t, tzinfo=tz)
-        today_end = datetime.combine(base.date(), end_t, tzinfo=tz)
-        window_seconds = int((today_end - base).total_seconds())
+        tomorrow_end = datetime.combine(base.date(), end_t, tzinfo=tz)
+        span = int((tomorrow_end - base).total_seconds())
 
-    offset = random.randint(0, max(0, window_seconds))
+    offset = random.randint(0, max(0, span))
     return base + timedelta(seconds=offset)
 
 
 def render_as_image(title: str, lines: list[str], out_path: str) -> None:
-    """把文本渲染成一张图片（代替截图）。"""
-    # 尽量用系统字体；没有也能用默认字体
+    """把文本渲染成图片，作为“截图”发给你。"""
+    max_width = 1100
+    padding = 30
+
     try:
         font = ImageFont.truetype("DejaVuSans.ttf", 22)
-        font_bold = ImageFont.truetype("DejaVuSans.ttf", 26)
+        font_bold = ImageFont.truetype("DejaVuSans.ttf", 28)
     except Exception:
         font = ImageFont.load_default()
         font_bold = font
 
-    padding = 30
-    max_width = 1100
-
-    # 先测量高度
     dummy = Image.new("RGB", (max_width, 10), "white")
-    d = ImageDraw.Draw(dummy)
+    draw = ImageDraw.Draw(dummy)
 
     def wrap(text: str) -> list[str]:
-        words = list(text)
+        # 按字符换行，兼容中文
         out, cur = [], ""
-        for ch in words:
+        for ch in text:
             test = cur + ch
-            w = d.textlength(test, font=font)
+            w = draw.textlength(test, font=font)
             if w > (max_width - 2 * padding):
                 out.append(cur)
                 cur = ch
@@ -92,113 +98,144 @@ def render_as_image(title: str, lines: list[str], out_path: str) -> None:
             out.append(cur)
         return out
 
-    wrapped = []
-    wrapped.append(("title", title))
+    wrapped = [("title", title)]
     for ln in lines:
+        ln = ln.rstrip()
+        if not ln:
+            wrapped.append(("line", ""))
+            continue
         for wln in wrap(ln):
             wrapped.append(("line", wln))
 
     line_h = 34
-    title_h = 44
-    height = padding * 2 + title_h + (len(wrapped) - 1) * line_h + 20
+    title_h = 52
+    height = padding * 2 + title_h + max(0, len(wrapped) - 1) * line_h + 10
 
     img = Image.new("RGB", (max_width, height), "white")
-    draw = ImageDraw.Draw(img)
+    d2 = ImageDraw.Draw(img)
 
     y = padding
-    # title
-    draw.text((padding, y), title, fill="black", font=font_bold)
+    d2.text((padding, y), title, fill="black", font=font_bold)
     y += title_h
 
-    for kind, txt in wrapped[1:]:
-        draw.text((padding, y), txt, fill="black", font=font)
+    for _, txt in wrapped[1:]:
+        d2.text((padding, y), txt, fill="black", font=font)
         y += line_h
 
     img.save(out_path)
 
 
-async def wait_buttons_message(client: TelegramClient, timeout: int = 25):
-    """等待目标 bot 发来带按钮的消息。"""
-    deadline = asyncio.get_event_loop().time() + timeout
-    while True:
-        remain = deadline - asyncio.get_event_loop().time()
-        if remain <= 0:
-            return None
-        try:
-            ev = await client.wait_for(events.NewMessage(from_users=TARGET_BOT), timeout=remain)
-        except asyncio.TimeoutError:
-            return None
-        if ev.message.buttons:
-            return ev.message
+async def wait_new_message(client, *, from_user, timeout=25):
+    """
+    等待来自指定用户/机器人的一条新消息（兼容没有 client.wait_for 的 telethon 版本）。
+    """
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+    builder = events.NewMessage(from_users=from_user)
+
+    async def handler(event):
+        if not fut.done():
+            fut.set_result(event.message)
+
+    client.add_event_handler(handler, builder)
+    try:
+        return await asyncio.wait_for(fut, timeout=timeout)
+    finally:
+        client.remove_event_handler(handler, builder)
 
 
-async def click_button_contains(msg, needle: str) -> bool:
-    """点击按钮（按文字包含匹配）。"""
+async def find_latest_message_with_buttons(client, limit=50):
+    msgs = await client.get_messages(TARGET_BOT, limit=limit)
+    for m in msgs:
+        if m.buttons:
+            return m
+    return None
+
+
+def format_buttons(msg) -> list[str]:
+    if not msg.buttons:
+        return []
+    rows = []
+    for row in msg.buttons:
+        rows.append(" | ".join([(b.text or "").strip() for b in row]))
+    return rows
+
+
+async def click_button_contains_on_message(msg, keyword: str) -> bool:
+    """
+    遍历按钮，按坐标点击。
+    适用于 inline keyboard（回调按钮）。keyword 用“包含匹配”。
+    """
     if not msg.buttons:
         return False
-    needle = needle.strip()
+    keyword = keyword.strip()
     for r, row in enumerate(msg.buttons):
         for c, btn in enumerate(row):
             t = (btn.text or "").strip()
-            if needle and needle in t:
+            if keyword and (keyword in t):
                 await msg.click(r, c)
                 return True
     return False
 
 
-async def run_once(client: TelegramClient) -> str:
-    """执行一次签到，并返回结果文本。"""
+async def run_once(client) -> tuple[bool, str]:
+    """
+    执行一次：/start -> 找带按钮的消息 -> 点包含“签到”的按钮 -> 收集最近消息文本
+    返回 (success, text)
+    """
     # 1) 发 /start
     await client.send_message(TARGET_BOT, START_CMD)
 
-    # 2) 等菜单按钮
-    menu = await wait_buttons_message(client, timeout=25)
-    if not menu:
-        return "失败：没等到带按钮的菜单消息（25s 超时）。"
-
-    # 3) 点击“签到”
-    ok = await click_button_contains(menu, BUTTON_TEXT)
-    if not ok:
-        btns = []
-        for row in menu.buttons:
-            for b in row:
-                btns.append((b.text or "").strip())
-        return "失败：没找到匹配按钮。当前按钮有：\n- " + "\n- ".join(btns)
-
-    # 4) 等 bot 返回结果消息（可能是新消息）
+    # 2) 等 bot 至少回一条（有些 bot 会先回文字再给按钮）
     try:
-        ev = await client.wait_for(events.NewMessage(from_users=TARGET_BOT), timeout=25)
-        result_msg = ev.message
+        await wait_new_message(client, from_user=TARGET_BOT, timeout=WAIT_BOT_REPLY_SEC)
     except asyncio.TimeoutError:
-        result_msg = None
+        return False, f"失败：发送 {START_CMD} 后 {WAIT_BOT_REPLY_SEC}s 没收到 bot 回复。"
 
-    # 5) 拉取最近几条消息用于“截图”
-    msgs = await client.get_messages(TARGET_BOT, limit=6)
+    # 3) 找最近带 buttons 的消息
+    menu = await find_latest_message_with_buttons(client, limit=60)
+    if not menu:
+        return False, "失败：最近 60 条里都没有 buttons，无法点击。"
+
+    # 4) 点“签到”按钮（包含匹配）
+    ok = await click_button_contains_on_message(menu, BUTTON_KEYWORD)
+    if not ok:
+        btn_rows = format_buttons(menu)
+        return False, "失败：没找到包含“%s”的按钮。\n当前按钮：\n- %s" % (
+            BUTTON_KEYWORD,
+            "\n- ".join(btn_rows) if btn_rows else "(空)"
+        )
+
+    # 5) 等 bot 回结果（不一定必须，但通常会有）
+    try:
+        await wait_new_message(client, from_user=TARGET_BOT, timeout=WAIT_BOT_REPLY_SEC)
+    except asyncio.TimeoutError:
+        pass
+
+    # 6) 把最近几条消息整理成“截图内容”
+    msgs = await client.get_messages(TARGET_BOT, limit=8)
     msgs = list(reversed(msgs))
 
     lines = []
     for m in msgs:
         txt = (m.message or "").strip()
         if txt:
-            # 只取前几行防止太长
-            txt = "\n".join(txt.splitlines()[:8])
-            lines.append(f"[Bot] {txt}")
+            # 控制长度，避免图片太长
+            txt = "\n".join(txt.splitlines()[:10])
+            lines.append(txt)
         if m.buttons:
-            btns = []
-            for row in m.buttons:
-                btns.append(" | ".join([(b.text or "").strip() for b in row]))
-            lines.append("[Buttons] " + " / ".join(btns))
+            rows = format_buttons(m)
+            if rows:
+                lines.append("[Buttons] " + " / ".join(rows))
 
-    if result_msg and (result_msg.message or "").strip():
-        lines.append("——")
-        lines.append("最终返回：")
-        lines.append((result_msg.message or "").strip())
-
-    return "\n".join(lines) if lines else "完成：已点击按钮，但未捕获到可展示的消息内容。"
+    if not lines:
+        lines = ["完成：已点击按钮，但未抓到可展示的文本消息。"]
+    return True, "\n".join(lines)
 
 
 async def main():
     tz = ZoneInfo(TZ)
+
     # 创建 client
     if SESSION_STRING:
         client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -209,25 +246,54 @@ async def main():
 
     # 启动提示
     now = datetime.now(tz)
-    nxt = choose_next_run(now)
-    await client.send_message(SEND_TO, f"✅ 签到定时服务已启动。\n时区：{TZ}\n下一次运行：{nxt.isoformat()}")
+    next_run = choose_next_run(now)
+    await client.send_message(
+        SEND_TO,
+        f"✅ 签到定时服务已启动\n"
+        f"TZ={TZ}\n"
+        f"窗口={WINDOW_START}-{WINDOW_END}\n"
+        f"下一次运行={next_run.isoformat()}"
+    )
+
+    last_run_date = None  # 确保“每天只执行一次”
 
     while True:
         now = datetime.now(tz)
+
+        # 如果今天已经执行过，就睡到明天窗口前再算
+        if last_run_date == now.date():
+            tomorrow = datetime.combine(now.date() + timedelta(days=1), parse_hhmm(WINDOW_START), tzinfo=tz)
+            sleep_s = max(60, int((tomorrow - now).total_seconds()))
+            await asyncio.sleep(sleep_s)
+            continue
+
         run_at = choose_next_run(now)
         sleep_s = max(0, (run_at - now).total_seconds())
         await asyncio.sleep(sleep_s)
 
         stamp = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
         try:
-            result_text = await run_once(client)
-            title = f"TG 签到结果（{stamp}，{TZ}）"
-            out_path = "/tmp/checkin.png"
-            render_as_image(title, result_text.splitlines(), out_path)
+            success, text = await run_once(client)
+            last_run_date = datetime.now(tz).date()
 
-            await client.send_file(SEND_TO, out_path, caption=title)
+            title = f"TG 签到结果（{stamp} {TZ}）"
+            out_path = "/tmp/checkin.png"
+            render_as_image(
+                title=title,
+                lines=text.splitlines(),
+                out_path=out_path
+            )
+
+            caption = "✅ 成功" if success else "❌ 失败"
+            await client.send_file(SEND_TO, out_path, caption=f"{caption}\n{title}")
+
+            # 失败的话冷却，避免短期反复
+            if not success:
+                await asyncio.sleep(COOLDOWN_ON_FAIL_SEC)
+
         except Exception as e:
-            await client.send_message(SEND_TO, f"❌ 签到任务异常（{stamp}）：{type(e).__name__}: {e}")
+            await client.send_message(SEND_TO, f"❌ 任务异常（{stamp}）：{type(e).__name__}: {e}")
+            await asyncio.sleep(COOLDOWN_ON_FAIL_SEC)
 
 
 if __name__ == "__main__":
